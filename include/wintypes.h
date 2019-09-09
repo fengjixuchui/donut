@@ -8,21 +8,18 @@
 #ifndef __WIN_TYPES
 #define __WIN_TYPES__
 
-/*
-#if _MSC_VER
-    #ifndef snprintf
-        #define snprintf _snprintf
-    #endif
-    #ifndef snscanf
-        #define snscanf _snscanf
-    #endif
-#endif
-*/
-
 #ifdef _MSC_VER
     #include <stdint.h>
 #else
     #include <inttypes.h>
+#endif
+
+#ifndef FALSE
+#define FALSE 0
+#endif
+
+#ifndef TRUE
+#define TRUE 1
 #endif
 
 #ifndef BYTE
