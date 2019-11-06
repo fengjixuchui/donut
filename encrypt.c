@@ -31,6 +31,9 @@
 
 #include "encrypt.h"
 
+#include <stdio.h>
+#include <string.h>
+
 static void chaskey(void *mk, void *p) {
     uint32_t i,*w=p,*k=mk;
 
