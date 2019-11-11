@@ -50,10 +50,30 @@ typedef WCHAR** (WINAPI *p_wcmdln_t)(VOID);
 
 BOOL SetCommandLineW(PDONUT_INSTANCE inst, PCWSTR NewCommandLine);
 
-// same as strcmp
-int xstrcmp(char *s1, char *s2) {
-    while(*s1 && (*s1==*s2))s1++,s2++;
-    return (int)*(unsigned char*)s1 - *(unsigned char*)s2;
+int compare(const char *s1, const char *s2) {
+    while(*s1 && *s2) {
+      if(*s1 != *s2) {
+        return 0;
+      }
+      s1++; s2++;
+    }
+    return *s2 == 0;
+}
+
+const char* _strstr(const char *s1, const char *s2) {
+    while (*s1) {
+      if((*s1 == *s2) && compare(s1, s2)) return s1;
+      s1++;
+    }
+    return NULL;
+}
+
+int _strcmp(const char *str1, const char *str2) {
+    while (*str1 && *str2) {
+      if(*str1 != *str2) break;
+      str1++; str2++;
+    }
+    return (int)*str1 - (int)*str2;
 }
 
 // In-Memory execution of unmanaged DLL file. YMMV with EXE files requiring subsystem..
@@ -180,14 +200,16 @@ VOID RunPE(PDONUT_INSTANCE inst, PDONUT_MODULE mod) {
 
             // run entrypoint as thread?
             if(mod->thread != 0) {
-              // if this is ExitProcess or exit, replace it with RtlExitUserThread
-              if(!xstrcmp(ibn->Name, inst->exitproc1) || 
-                 !xstrcmp(ibn->Name, inst->exitproc2) ||
-                 !xstrcmp(ibn->Name, inst->exitproc3) ||
-                 !xstrcmp(ibn->Name, inst->exitproc4) ||
-                 !xstrcmp(ibn->Name, inst->exitproc5)) 
+              // if this is an exit-related API, replace it with RtlExitUserThread
+              if(!_strcmp(ibn->Name, inst->exitproc1) || 
+                 !_strcmp(ibn->Name, inst->exitproc2) ||
+                 !_strcmp(ibn->Name, inst->exitproc3) ||
+                 !_strcmp(ibn->Name, inst->exitproc4) ||
+                 !_strcmp(ibn->Name, inst->exitproc5) ||
+                 !_strcmp(ibn->Name, inst->exitproc6) ||
+                 !_strcmp(ibn->Name, inst->exitproc7)) 
               {
-                DPRINT("Replacing %s with RtlExitUserThread", ibn->Name);
+                DPRINT("Replacing %s!%s with ntdll!RtlExitUserThread", name, ibn->Name);
                 ft->u1.Function = (ULONG_PTR)inst->api.RtlExitUserThread;
                 continue;
               }
@@ -285,7 +307,7 @@ VOID RunPE(PDONUT_INSTANCE inst, PDONUT_MODULE mod) {
         
             do {
               str = RVA2VA(PCHAR, cs, sym[cnt-1]);
-              if(!xstrcmp(str, mod->method)) {
+              if(!_strcmp(str, mod->method)) {
                 DllFunction = RVA2VA(DllFunction_t, cs, adr[ord[cnt-1]]);
                 break;
               }
@@ -461,12 +483,11 @@ BOOL SetCommandLineW(PDONUT_INSTANCE inst, PCWSTR CommandLine) {
          dte->DllBase != NULL; 
          dte=(PLDR_DATA_TABLE_ENTRY)dte->InLoadOrderLinks.Flink)
     {
-      DPRINT("Checking %ws", dte->BaseDllName.Buffer);
-      
       // check for _amcmdln
       argv = (CHAR**)inst->api.GetProcAddress(dte->DllBase, inst->acmdln);
       if(argv != NULL && *argv != NULL) {
-        DPRINT("Setting _acmdln \"%s\" to \"%s\"", *argv, ansi.Buffer);
+        DPRINT("Setting %ws!_acmdln \"%s\" to \"%s\"", 
+          dte->BaseDllName.Buffer, *argv, ansi.Buffer);
         *argv = ansi.Buffer;
       }
       // check for __p__acmdln function
@@ -474,14 +495,16 @@ BOOL SetCommandLineW(PDONUT_INSTANCE inst, PCWSTR CommandLine) {
       if(p_acmdln != NULL) {
         argv = p_acmdln();
         if(argv != NULL && *argv != NULL) {
-          DPRINT("Setting __p__acmdln \"%s\" to \"%s\"", *argv, ansi.Buffer);
+          DPRINT("Setting %ws!__p__acmdln \"%s\" to \"%s\"", 
+            dte->BaseDllName.Buffer, *argv, ansi.Buffer);
           *argv = ansi.Buffer;
         }
       }
       // check for __argv
       argv = (CHAR**)inst->api.GetProcAddress(dte->DllBase, inst->argv);
       if(argv != NULL && *argv != NULL) {
-        DPRINT("Setting __argv \"%s\" to \"%s\"", *argv, ansi.Buffer);
+        DPRINT("Setting %ws!__argv \"%s\" to \"%s\"", 
+          dte->BaseDllName.Buffer, *argv, ansi.Buffer);
         *argv = ansi.Buffer;
       }
       // check for __p___argv function
@@ -489,7 +512,8 @@ BOOL SetCommandLineW(PDONUT_INSTANCE inst, PCWSTR CommandLine) {
       if(p_acmdln != NULL) {
         argv = p_acmdln();
         if(argv != NULL && *argv != NULL) {
-          DPRINT("Setting __p___argv %s to %s", *argv, ansi.Buffer);
+          DPRINT("Setting %ws!__p___argv %s to %s", 
+            dte->BaseDllName.Buffer, *argv, ansi.Buffer);
           *argv = ansi.Buffer;
         }
       }
@@ -499,7 +523,8 @@ BOOL SetCommandLineW(PDONUT_INSTANCE inst, PCWSTR CommandLine) {
       // check for _wcmdln
       wargv = (WCHAR**)inst->api.GetProcAddress(dte->DllBase, inst->wcmdln);  
       if(wargv != NULL && *wargv != NULL) {
-        DPRINT("Setting _wcmdln to %ws", wcs->Buffer);
+        DPRINT("Setting %ws!_wcmdln to %ws", 
+          dte->BaseDllName.Buffer, wcs->Buffer);
         *wargv = wcs->Buffer;
       }
       // check for __p__wcmdln function
@@ -507,14 +532,16 @@ BOOL SetCommandLineW(PDONUT_INSTANCE inst, PCWSTR CommandLine) {
       if(p_wcmdln != NULL) {
         wargv = p_wcmdln();
         if(wargv != NULL && *wargv != NULL) {
-          DPRINT("Setting __p__wcmdln \"%ws\" to \"%ws\"", *wargv, wcs->Buffer);
+          DPRINT("Setting %ws!__p__wcmdln \"%ws\" to \"%ws\"", 
+            dte->BaseDllName.Buffer, *wargv, wcs->Buffer);
           *wargv = wcs->Buffer;
         }
       }
       // check for __wargv
       wargv = (WCHAR**)inst->api.GetProcAddress(dte->DllBase, inst->wargv);  
       if(wargv != NULL && *wargv != NULL) {
-        DPRINT("Setting __wargv \"%ws\" to \"%ws\"", *wargv, wcs->Buffer);
+        DPRINT("Setting %ws!__wargv \"%ws\" to \"%ws\"", 
+          dte->BaseDllName.Buffer, *wargv, wcs->Buffer);
         *wargv = wcs->Buffer;
       }
       // check for __p___wargv function
@@ -522,10 +549,12 @@ BOOL SetCommandLineW(PDONUT_INSTANCE inst, PCWSTR CommandLine) {
       if(p_wcmdln != NULL) {
         wargv = p_wcmdln();
         if(wargv != NULL && *wargv != NULL) {
-          DPRINT("Setting __p___wargv \"%ws\" to \"%ws\"", *wargv, wcs->Buffer);
+          DPRINT("Setting %ws!__p___wargv \"%ws\" to \"%ws\"", 
+            dte->BaseDllName.Buffer, *wargv, wcs->Buffer);
           *wargv = wcs->Buffer;
         }
       }
     }
+    
     return TRUE;
 }
