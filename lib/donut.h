@@ -39,6 +39,15 @@
 #include <sys/stat.h>
 #include <inttypes.h>
 
+#if defined(_WIN32) || defined(_WIN64)
+#define WINDOWS
+#include <windows.h>
+#else
+#define LINUX
+#include <unistd.h>
+#include <dlfcn.h>
+#endif
+
 #define DONUT_ERROR_SUCCESS              0
 #define DONUT_ERROR_FILE_NOT_FOUND       1
 #define DONUT_ERROR_FILE_EMPTY           2
@@ -87,9 +96,10 @@
 
 // compression engine
 #define DONUT_COMPRESS_NONE              1
-#define DONUT_COMPRESS_LZNT1             2  // COMPRESSION_FORMAT_LZNT1
-#define DONUT_COMPRESS_XPRESS            3  // COMPRESSION_FORMAT_XPRESS
-#define DONUT_COMPRESS_XPRESS_HUFF       4  // COMPRESSION_FORMAT_XPRESS_HUFF
+#define DONUT_COMPRESS_APLIB             2
+#define DONUT_COMPRESS_LZNT1             3  // COMPRESSION_FORMAT_LZNT1
+#define DONUT_COMPRESS_XPRESS            4  // COMPRESSION_FORMAT_XPRESS
+#define DONUT_COMPRESS_XPRESS_HUFF       5  // COMPRESSION_FORMAT_XPRESS_HUFF
 
 // entropy level
 #define DONUT_ENTROPY_NONE               1  // don't use any entropy
@@ -101,8 +111,9 @@
 #define DONUT_OPT_EXIT_PROCESS           2  // call RtlExitUserProcess to terminate host process
 
 // instance type
-#define DONUT_INSTANCE_PIC               1  // Self-contained
-#define DONUT_INSTANCE_URL               2  // Download from remote server
+#define DONUT_INSTANCE_EMBED             1  // Self-contained
+#define DONUT_INSTANCE_HTTP              2  // Download from remote HTTP/HTTPS server
+#define DONUT_INSTANCE_DNS               3  // Download from remote DNS server
 
 // AMSI/WLDP options
 #define DONUT_BYPASS_NONE                1  // Disables bypassing AMSI/WDLP
@@ -111,22 +122,22 @@
 
 #define DONUT_MAX_NAME                 256  // maximum length of string for domain, class, method and parameter names
 #define DONUT_MAX_DLL                    8  // maximum number of DLL supported by instance
-#define DONUT_MAX_URL                  256
 #define DONUT_MAX_MODNAME                8
 #define DONUT_SIG_LEN                    8  // 64-bit string to verify decryption ok
 #define DONUT_VER_LEN                   32
 #define DONUT_DOMAIN_LEN                 8
     
 typedef struct _DONUT_CONFIG {
+    uint32_t        len, zlen;                // original length of input file and compressed length
     // general / misc options for loader
     int             arch;                     // target architecture
     int             bypass;                   // bypass option for AMSI/WDLP
     int             compress;                 // engine to use when compressing file via RtlCompressBuffer
     int             entropy;                  // entropy/encryption level
-    int             fork;                     // fork/create a new thread for the loader
     int             format;                   // output format for loader
     int             exit_opt;                 // return to caller or invoke RtlExitUserProcess to terminate the host process
     int             thread;                   // run entrypoint of unmanaged EXE as a thread. attempts to intercept calls to exit-related API
+    uint64_t        oep;                      // original entrypoint of target host file
     
     // files in/out
     char            input[DONUT_MAX_NAME];    // name of input file to read and load in-memory
@@ -140,10 +151,10 @@ typedef struct _DONUT_CONFIG {
     
     // command line for DLL/EXE
     char            param[DONUT_MAX_NAME];    // command line to use for unmanaged DLL/EXE and .NET DLL/EXE
-    int             ansi;                     // param is passed to DLL function without converting to unicode
+    int             unicode;                  // param is converted to UNICODE before being passed to DLL function
     
     // HTTP staging information
-    char            url[DONUT_MAX_URL];       // points to root path of where module will be stored on remote http server
+    char            server[DONUT_MAX_NAME];   // points to root path of where module will be stored on remote http server
     char            modname[DONUT_MAX_NAME];  // name of module written to disk for http stager
     
     // DONUT_MODULE
@@ -152,19 +163,27 @@ typedef struct _DONUT_CONFIG {
     void            *mod;                     // points to DONUT_MODULE
     
     // DONUT_INSTANCE
-    int             inst_type;                // DONUT_INSTANCE_PIC or DONUT_INSTANCE_URL
+    int             inst_type;                // DONUT_INSTANCE_PIC or DONUT_INSTANCE_HTTP
     int             inst_len;                 // size of DONUT_INSTANCE
     void            *inst;                    // points to DONUT_INSTANCE
     
+    // shellcode generated from configuration
     int             pic_len;                  // size of loader/shellcode
     void*           pic;                      // points to loader/shellcode
 } DONUT_CONFIG, *PDONUT_CONFIG;
+
+// function pointers
+typedef int (__cdecl *DonutCreate_t)(PDONUT_CONFIG);
+typedef int (__cdecl *DonutDelete_t)(PDONUT_CONFIG);
+typedef const char* (__cdecl *DonutError_t)(int);
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+// prototypes
 int DonutCreate(PDONUT_CONFIG);
+int DonutCreateWrapper(const char *);
 int DonutDelete(PDONUT_CONFIG);
 const char* DonutError(int);
 

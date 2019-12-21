@@ -83,14 +83,17 @@ char *get_pc(void);
 #define ADR(type, addr) (type)(addr) // do nothing on 64-bit
 #endif
 
-void *Memset(void *ptr, int value, size_t num);
-void *Memcpy(void *destination, const void *source, size_t num);
-int Memcmp(const void *ptr1, const void *ptr2, size_t num);
+void *Memset(void *ptr, int value, unsigned int num);
+void *Memcpy(void *destination, const void *source, unsigned int num);
+int Memcmp(const void *ptr1, const void *ptr2, unsigned int num);
+int _strcmp(const char *s1, const char *s2);
+NTSTATUS RtlUserThreadStart(LPTHREAD_START_ROUTINE lpStartAddress, LPVOID lpParameter);
 
 #if !defined(_MSC_VER)
 #define memcmp(x,y,z) Memcmp(x,y,z)
 #endif
 
+#include "depack.h"
 #include "peb.h"           // Process Environment Block
 #include "winapi.h"        // Prototypes
 #include "clr.h"           // Common Language Runtime Interface
@@ -121,7 +124,7 @@ typedef struct _DONUT_ASSEMBLY {
 } DONUT_ASSEMBLY, *PDONUT_ASSEMBLY;
 
     // Downloads a module from remote HTTP server into memory
-    BOOL DownloadModule(PDONUT_INSTANCE);
+    BOOL DownloadFromHTTP(PDONUT_INSTANCE);
     
     // .NET DLL/EXE
     BOOL LoadAssembly(PDONUT_INSTANCE, PDONUT_MODULE, PDONUT_ASSEMBLY);
